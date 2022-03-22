@@ -16,6 +16,7 @@ import (
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/ibrt/golang-errors/errorz"
+	"github.com/ibrt/golang-inject-http/httpz"
 	"github.com/ibrt/golang-inject/injectz"
 	"github.com/ibrt/golang-validation/vz"
 	"github.com/labstack/echo/v4"
@@ -146,7 +147,7 @@ func (s *HTTPSimulator) handle(c echo.Context, routeKey *lambdaz.HTTPRouteKey) e
 		return errorz.Wrap(err)
 	}
 
-	resp, err := http.Post(
+	resp, err := httpz.Get(c.Request().Context()).Post(
 		s.cfg.AWSProxyIntegrations[s.cfg.Routes[routeKey.Raw].IntegrationName].URL,
 		"application/json; charset=UTF-8",
 		bytes.NewReader(reqBuf))
@@ -158,6 +159,10 @@ func (s *HTTPSimulator) handle(c echo.Context, routeKey *lambdaz.HTTPRouteKey) e
 	respBuf, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return errorz.Wrap(err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return errorz.Errorf("simulator: integration responded with %v: %v", errorz.A(resp.StatusCode, string(respBuf)))
 	}
 
 	apiResp := &events.APIGatewayV2HTTPResponse{}
