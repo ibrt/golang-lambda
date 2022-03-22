@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"net/http"
+	"reflect"
 	"testing"
 
 	"github.com/aws/aws-lambda-go/events"
@@ -151,79 +152,104 @@ func (s *Suite) TestStaticAPIKeyHTTPRequestAuthorizer(ctx context.Context, t *te
 		}))), "unauthorized: invalid API key")
 }
 
-func (s *Suite) TestJSONHTTPRequestUnmarshaler(ctx context.Context, t *testing.T) {
-	resp, err := HTTPRequestUnmarshalerFunc(func(ctx context.Context) (interface{}, error) { return "resp", nil }).Unmarshal(ctx)
-	fixturez.RequireNoError(t, err)
-	require.Equal(t, "resp", resp)
+func (s *Suite) TestNoBodyHTTPRequestUnmarshaler(ctx context.Context, t *testing.T) {
+	require.Nil(t, NewNoBodyHTTPRequestUnmarshaler(true).GetRequestType())
 
-	resp, err = NewJSONHTTPRequestUnmarshaler(testRequest{}).
+	req, err := NewNoBodyHTTPRequestUnmarshaler(true).
+		Unmarshal(context.WithValue(ctx, httpRequestContextKey, newHTTPRequestContext(&events.APIGatewayV2HTTPRequest{
+			Body: "not-empty",
+		})))
+	require.EqualError(t, err, "bad request: unexpected body")
+	require.Nil(t, req)
+
+	req, err = NewNoBodyHTTPRequestUnmarshaler(false).
+		Unmarshal(context.WithValue(ctx, httpRequestContextKey, newHTTPRequestContext(&events.APIGatewayV2HTTPRequest{
+			Body: "not-empty",
+		})))
+	fixturez.RequireNoError(t, err)
+	require.Nil(t, req)
+
+	req, err = NewNoBodyHTTPRequestUnmarshaler(true).
+		Unmarshal(context.WithValue(ctx, httpRequestContextKey, newHTTPRequestContext(&events.APIGatewayV2HTTPRequest{
+			// intentionally empty
+		})))
+	fixturez.RequireNoError(t, err)
+	require.Nil(t, req)
+}
+
+func (s *Suite) TestJSONHTTPRequestUnmarshaler(ctx context.Context, t *testing.T) {
+	reqType := NewJSONHTTPRequestUnmarshaler(testRequest{}).GetRequestType()
+	require.NotNil(t, reqType)
+	require.Equal(t, reflect.TypeOf(testRequest{}), *reqType)
+
+	req, err := NewJSONHTTPRequestUnmarshaler(testRequest{}).
 		Unmarshal(context.WithValue(ctx, httpRequestContextKey, newHTTPRequestContext(&events.APIGatewayV2HTTPRequest{
 			// intentionally empty
 		})))
 	require.EqualError(t, err, "bad request: missing body")
-	require.Nil(t, resp)
+	require.Nil(t, req)
 
-	resp, err = NewJSONHTTPRequestUnmarshaler(testRequest{}).
+	req, err = NewJSONHTTPRequestUnmarshaler(testRequest{}).
 		Unmarshal(context.WithValue(ctx, httpRequestContextKey, newHTTPRequestContext(&events.APIGatewayV2HTTPRequest{
 			Body: "bad",
 		})))
 	require.EqualError(t, err, "bad request: invalid character 'b' looking for beginning of value")
-	require.Nil(t, resp)
+	require.Nil(t, req)
 
-	resp, err = NewJSONHTTPRequestUnmarshaler(testRequest{}).
+	req, err = NewJSONHTTPRequestUnmarshaler(testRequest{}).
 		Unmarshal(context.WithValue(ctx, httpRequestContextKey, newHTTPRequestContext(&events.APIGatewayV2HTTPRequest{
 			Body: `{ "unknown": "unknown" }`,
 		})))
 	require.EqualError(t, err, `bad request: json: unknown field "unknown"`)
-	require.Nil(t, resp)
+	require.Nil(t, req)
 
-	resp, err = NewJSONHTTPRequestUnmarshaler(testRequest{}).
+	req, err = NewJSONHTTPRequestUnmarshaler(testRequest{}).
 		Unmarshal(context.WithValue(ctx, httpRequestContextKey, newHTTPRequestContext(&events.APIGatewayV2HTTPRequest{
 			Body: `{ "value": "value" }`,
 		})))
 	fixturez.RequireNoError(t, err)
-	require.Equal(t, &testRequest{Value: "value"}, resp)
+	require.Equal(t, &testRequest{Value: "value"}, req)
 
-	resp, err = NewJSONHTTPRequestUnmarshaler(testRequest{}).
+	req, err = NewJSONHTTPRequestUnmarshaler(testRequest{}).
 		Unmarshal(context.WithValue(ctx, httpRequestContextKey, newHTTPRequestContext(&events.APIGatewayV2HTTPRequest{
 			Body: `{ "value": "" }`,
 		})))
 	require.EqualError(t, err, "bad request: failed validation: Key: 'testRequest.value' Error:Field validation for 'value' failed on the 'required' tag")
-	require.Nil(t, resp)
+	require.Nil(t, req)
 
-	resp, err = NewJSONHTTPRequestUnmarshaler(testRequest{}).
+	req, err = NewJSONHTTPRequestUnmarshaler(testRequest{}).
 		Unmarshal(context.WithValue(ctx, httpRequestContextKey, newHTTPRequestContext(&events.APIGatewayV2HTTPRequest{
 			Body:            base64.StdEncoding.EncodeToString([]byte(`{ "value": "value" }`)),
 			IsBase64Encoded: true,
 		})))
 	fixturez.RequireNoError(t, err)
-	require.Equal(t, &testRequest{Value: "value"}, resp)
+	require.Equal(t, &testRequest{Value: "value"}, req)
 
-	resp, err = NewJSONHTTPRequestUnmarshaler(testRequest{}).
+	req, err = NewJSONHTTPRequestUnmarshaler(testRequest{}).
 		Unmarshal(context.WithValue(ctx, httpRequestContextKey, newHTTPRequestContext(&events.APIGatewayV2HTTPRequest{
 			Body:           `{}`,
 			RawQueryString: "value=value",
 		})))
 	fixturez.RequireNoError(t, err)
-	require.Equal(t, &testRequest{Value: "value"}, resp)
+	require.Equal(t, &testRequest{Value: "value"}, req)
 
-	resp, err = NewJSONHTTPRequestUnmarshaler(testRequest{}).
+	req, err = NewJSONHTTPRequestUnmarshaler(testRequest{}).
 		Unmarshal(context.WithValue(ctx, httpRequestContextKey, newHTTPRequestContext(&events.APIGatewayV2HTTPRequest{
 			Body:           `{}`,
 			RawQueryString: ";",
 		})))
 	require.EqualError(t, err, `bad request: invalid semicolon separator in query`)
-	require.Nil(t, resp)
+	require.Nil(t, req)
 
-	resp, err = NewJSONHTTPRequestUnmarshaler(testRequest{}).
+	req, err = NewJSONHTTPRequestUnmarshaler(testRequest{}).
 		Unmarshal(context.WithValue(ctx, httpRequestContextKey, newHTTPRequestContext(&events.APIGatewayV2HTTPRequest{
 			Body:           `{}`,
 			RawQueryString: "unknown=unknown",
 		})))
 	require.EqualError(t, err, `bad request: schema: invalid path "unknown"`)
-	require.Nil(t, resp)
+	require.Nil(t, req)
 
-	resp, err = NewJSONHTTPRequestUnmarshaler(testRequest{}).
+	req, err = NewJSONHTTPRequestUnmarshaler(testRequest{}).
 		Unmarshal(context.WithValue(ctx, httpRequestContextKey, newHTTPRequestContext(&events.APIGatewayV2HTTPRequest{
 			Body: `{}`,
 			PathParameters: map[string]string{
@@ -231,9 +257,9 @@ func (s *Suite) TestJSONHTTPRequestUnmarshaler(ctx context.Context, t *testing.T
 			},
 		})))
 	fixturez.RequireNoError(t, err)
-	require.Equal(t, &testRequest{Value: "value"}, resp)
+	require.Equal(t, &testRequest{Value: "value"}, req)
 
-	resp, err = NewJSONHTTPRequestUnmarshaler(testRequest{}).
+	req, err = NewJSONHTTPRequestUnmarshaler(testRequest{}).
 		Unmarshal(context.WithValue(ctx, httpRequestContextKey, newHTTPRequestContext(&events.APIGatewayV2HTTPRequest{
 			Body: `{}`,
 			PathParameters: map[string]string{
@@ -241,35 +267,35 @@ func (s *Suite) TestJSONHTTPRequestUnmarshaler(ctx context.Context, t *testing.T
 			},
 		})))
 	require.EqualError(t, err, `bad request: schema: invalid path "unknown"`)
-	require.Nil(t, resp)
+	require.Nil(t, req)
 
 	s.Logs.Mock.EXPECT().SetUser(gomock.Any(), gomock.Eq(&logz.User{
 		ID: "user-id",
 	}))
 
-	resp, err = NewJSONHTTPRequestUnmarshaler(testRequestUserExtractor{}).
+	req, err = NewJSONHTTPRequestUnmarshaler(testRequestUserExtractor{}).
 		Unmarshal(context.WithValue(ctx, httpRequestContextKey, newHTTPRequestContext(&events.APIGatewayV2HTTPRequest{
 			Body: `{ "value": "value" }`,
 		})))
 	fixturez.RequireNoError(t, err)
-	require.Equal(t, &testRequestUserExtractor{Value: "value"}, resp)
+	require.Equal(t, &testRequestUserExtractor{Value: "value"}, req)
 
-	resp, err = NewJSONHTTPRequestUnmarshaler(testRequest{}, NoUnmarshalBody).
+	req, err = NewJSONHTTPRequestUnmarshaler(testRequest{}, NoUnmarshalBody).
 		Unmarshal(context.WithValue(ctx, httpRequestContextKey, newHTTPRequestContext(&events.APIGatewayV2HTTPRequest{
 			Body: `{}`,
 		})))
 	require.EqualError(t, err, `bad request: unexpected body`)
-	require.Nil(t, resp)
+	require.Nil(t, req)
 
-	resp, err = NewJSONHTTPRequestUnmarshaler(testRequest{}, NoUnmarshalQueryStringParameters).
+	req, err = NewJSONHTTPRequestUnmarshaler(testRequest{}, NoUnmarshalQueryStringParameters).
 		Unmarshal(context.WithValue(ctx, httpRequestContextKey, newHTTPRequestContext(&events.APIGatewayV2HTTPRequest{
 			Body:           `{ "value": "value" }`,
 			RawQueryString: "value=other",
 		})))
 	fixturez.RequireNoError(t, err)
-	require.Equal(t, &testRequest{Value: "value"}, resp)
+	require.Equal(t, &testRequest{Value: "value"}, req)
 
-	resp, err = NewJSONHTTPRequestUnmarshaler(testRequest{}, NoUnmarshalPathParameters).
+	req, err = NewJSONHTTPRequestUnmarshaler(testRequest{}, NoUnmarshalPathParameters).
 		Unmarshal(context.WithValue(ctx, httpRequestContextKey, newHTTPRequestContext(&events.APIGatewayV2HTTPRequest{
 			Body: `{ "value": "value" }`,
 			PathParameters: map[string]string{
@@ -277,7 +303,7 @@ func (s *Suite) TestJSONHTTPRequestUnmarshaler(ctx context.Context, t *testing.T
 			},
 		})))
 	fixturez.RequireNoError(t, err)
-	require.Equal(t, &testRequest{Value: "value"}, resp)
+	require.Equal(t, &testRequest{Value: "value"}, req)
 
 	fixturez.RequirePanicsWith(t, "reqTemplate must be a struct", func() {
 		NewJSONHTTPRequestUnmarshaler(&testRequest{})
@@ -292,59 +318,63 @@ func (s *Suite) TestJSONHTTPRequestUnmarshaler(ctx context.Context, t *testing.T
 	})
 }
 
-func (s *Suite) TestJSONHTTPResponseMarshaler(ctx context.Context, t *testing.T) {
-	require.Equal(t,
-		&events.APIGatewayV2HTTPResponse{
-			StatusCode: http.StatusOK,
-			MultiValueHeaders: map[string][]string{
-				"Content-Type": {"application/json; charset=utf-8"},
-			},
-			Body: "{\n  \"value\": \"value\"\n}",
-		},
-		HTTPResponseMarshalerFunc(JSONHTTPResponseMarshaler).Marshal(
-			context.WithValue(ctx, httpResponseContextKey, newHTTPResponseContext()),
-			&testResponse{Value: "value"}))
+func (s *Suite) TestNoBodyHTTPResponseMarshaler(ctx context.Context, t *testing.T) {
+	require.Nil(t, NewNoBodyHTTPResponseMarshaler().GetResponseType())
 
 	require.Equal(t,
 		&events.APIGatewayV2HTTPResponse{
 			StatusCode: http.StatusAccepted,
 			MultiValueHeaders: map[string][]string{
-				"Content-Type": {"application/json; charset=utf-8"},
+				"X-Custom-Header": {"value"},
 			},
-			Body: "{\n  \"value\": \"value\"\n}",
+			Cookies: []string{"test="},
 		},
-		JSONHTTPResponseMarshaler(
+		NewNoBodyHTTPResponseMarshaler().Marshal(
 			context.WithValue(ctx, httpResponseContextKey, &HTTPResponseContext{
 				status:  http.StatusAccepted,
-				headers: http.Header{},
-			}),
-			&testResponse{Value: "value"}))
-
-	require.Equal(t,
-		&events.APIGatewayV2HTTPResponse{
-			StatusCode:        http.StatusOK,
-			MultiValueHeaders: map[string][]string{},
-		},
-		JSONHTTPResponseMarshaler(
-			context.WithValue(ctx, httpResponseContextKey, newHTTPResponseContext()),
-			nil))
-
-	require.Equal(t,
-		&events.APIGatewayV2HTTPResponse{
-			StatusCode:        http.StatusAccepted,
-			MultiValueHeaders: map[string][]string{},
-			Cookies:           []string{"test="},
-		},
-		JSONHTTPResponseMarshaler(
-			context.WithValue(ctx, httpResponseContextKey, &HTTPResponseContext{
-				status:  http.StatusAccepted,
-				headers: http.Header{},
+				headers: http.Header{"X-Custom-Header": {"value"}},
 				cookies: []http.Cookie{{Name: "test"}},
 			}),
 			nil))
+
+	fixturez.RequirePanicsWith(t, "resp unexpectedly not nil", func() {
+		NewNoBodyHTTPResponseMarshaler().Marshal(
+			context.WithValue(ctx, httpResponseContextKey, newHTTPResponseContext()),
+			&testResponse{})
+	})
+}
+
+func (s *Suite) TestJSONHTTPResponseMarshaler(ctx context.Context, t *testing.T) {
+	require.Equal(t,
+		&events.APIGatewayV2HTTPResponse{
+			StatusCode: http.StatusAccepted,
+			MultiValueHeaders: map[string][]string{
+				"Content-Type":    {"application/json; charset=utf-8"},
+				"X-Custom-Header": {"value"},
+			},
+			Cookies: []string{"test="},
+			Body:    "{\n  \"value\": \"value\"\n}",
+		},
+		NewJSONHTTPResponseMarshaler(testResponse{}).Marshal(
+			context.WithValue(ctx, httpResponseContextKey, &HTTPResponseContext{
+				status:  http.StatusAccepted,
+				headers: http.Header{"X-Custom-Header": {"value"}},
+				cookies: []http.Cookie{{Name: "test"}},
+			}),
+			&testResponse{Value: "value"}))
+
+	fixturez.RequirePanicsWith(t, "resp unexpectedly nil", func() {
+		NewJSONHTTPResponseMarshaler(testResponse{}).Marshal(
+			context.WithValue(ctx, httpResponseContextKey, newHTTPResponseContext()),
+			nil)
+	})
 }
 
 func (s *Suite) TestJSONHTTPErrorMarshaler(ctx context.Context, t *testing.T) {
+	respType := NewJSONHTTPResponseMarshaler(testResponse{}).GetResponseType()
+	require.NotNil(t, respType)
+	require.Equal(t, reflect.TypeOf(testResponse{}), *respType)
+
 	err := errorz.Errorf("test error")
 	errSummary := errorz.ToSummary(err)
 	errSummary.Status = http.StatusInternalServerError
@@ -357,7 +387,7 @@ func (s *Suite) TestJSONHTTPErrorMarshaler(ctx context.Context, t *testing.T) {
 			},
 			Body: jsonErrSummary,
 		},
-		HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler).Marshal(
+		NewJSONHTTPErrorMarshaler().Marshal(
 			context.WithValue(ctx, httpResponseContextKey, newHTTPResponseContext()),
 			err))
 
@@ -372,85 +402,59 @@ func (s *Suite) TestJSONHTTPErrorMarshaler(ctx context.Context, t *testing.T) {
 			},
 			Body: jsonErrSummary,
 		},
-		HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler).Marshal(
+		NewJSONHTTPErrorMarshaler().Marshal(
 			context.WithValue(ctx, httpResponseContextKey, newHTTPResponseContext()),
 			err))
 }
 
-func (s *Suite) TestNewHTTPEndpoint(_ context.Context, t *testing.T) {
-	fixturez.RequirePanicsWith(t, "errorMarshaler unexpectedly nil", func() {
+func (s *Suite) TestNewHTTPEndpoint(ctx context.Context, t *testing.T) {
+	fixturez.RequirePanicsWith(t, "requestUnmarshaler unexpectedly nil", func() {
 		NewHTTPEndpoint("", nil, nil, nil, nil, nil)
 	})
 
+	fixturez.RequirePanicsWith(t, "responseMarshaler unexpectedly nil", func() {
+		NewHTTPEndpoint("", nil, NewNoBodyHTTPRequestUnmarshaler(false), nil, nil, nil)
+	})
+
+	fixturez.RequirePanicsWith(t, "errorMarshaler unexpectedly nil", func() {
+		NewHTTPEndpoint("", nil, NewNoBodyHTTPRequestUnmarshaler(false), NewNoBodyHTTPResponseMarshaler(), nil, nil)
+	})
+
 	fixturez.RequirePanicsWith(t, "handlerFunc unexpectedly nil", func() {
-		NewHTTPEndpoint("", nil, nil, nil, HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler), nil)
+		NewHTTPEndpoint("", nil, NewNoBodyHTTPRequestUnmarshaler(false), NewNoBodyHTTPResponseMarshaler(), NewJSONHTTPErrorMarshaler(), nil)
 	})
 
 	fixturez.RequirePanicsWith(t, "invalid route key: bad", func() {
-		NewHTTPEndpoint("bad", nil, nil, nil, HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler), "")
+		NewHTTPEndpoint("bad", nil, NewNoBodyHTTPRequestUnmarshaler(false), NewNoBodyHTTPResponseMarshaler(), NewJSONHTTPErrorMarshaler(), "")
 	})
 
 	fixturez.RequirePanicsWith(t, "handlerFunc must be a function", func() {
-		NewHTTPEndpoint("POST /path", nil, nil, nil, HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler), "")
+		NewHTTPEndpoint("POST /path", nil, NewNoBodyHTTPRequestUnmarshaler(false), NewNoBodyHTTPResponseMarshaler(), NewJSONHTTPErrorMarshaler(), "")
 	})
 
-	fixturez.RequirePanicsWith(t, "handlerFunc without requestUnmarshaler must accept a single argument", func() {
-		NewHTTPEndpoint("POST /path", nil, nil, nil, HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler), func() {})
+	fixturez.RequirePanicsWith(t, "handlerFunc for a requestUnmarshaler with no request type must be func(context.Context) (...)", func() {
+		NewHTTPEndpoint("POST /path", nil, NewNoBodyHTTPRequestUnmarshaler(false), NewNoBodyHTTPResponseMarshaler(), NewJSONHTTPErrorMarshaler(), func() {})
 	})
 
-	fixturez.RequirePanicsWith(t, "handlerFunc argument must be context.Context", func() {
-		NewHTTPEndpoint("POST /path", nil, nil, nil, HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler), func(string) {})
+	fixturez.RequirePanicsWith(t, "handlerFunc for a requestUnmarshaler with request type T must be func(context.Context, *T) (...)", func() {
+		NewHTTPEndpoint("POST /path", nil, NewJSONHTTPRequestUnmarshaler(testRequest{}), NewNoBodyHTTPResponseMarshaler(), NewJSONHTTPErrorMarshaler(), func() {})
 	})
 
-	fixturez.RequirePanicsWith(t, "handlerFunc with requestUnmarshaler must accept two arguments", func() {
-		NewHTTPEndpoint("POST /path", nil, NewJSONHTTPRequestUnmarshaler(testRequest{}), nil, HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler), func() {})
+	fixturez.RequirePanicsWith(t, "handlerFunc for a responseMarshaler with no response type must be func(...) error", func() {
+		NewHTTPEndpoint("POST /path", nil, NewNoBodyHTTPRequestUnmarshaler(false), NewNoBodyHTTPResponseMarshaler(), NewJSONHTTPErrorMarshaler(), func(context.Context) {})
 	})
 
-	fixturez.RequirePanicsWith(t, "handlerFunc first argument must be context.Context", func() {
-		NewHTTPEndpoint("POST /path", nil, NewJSONHTTPRequestUnmarshaler(testRequest{}), nil, HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler), func(string, string) {})
-	})
-
-	fixturez.RequirePanicsWith(t, "handlerFunc second argument must be a struct pointer", func() {
-		NewHTTPEndpoint("POST /path", nil, NewJSONHTTPRequestUnmarshaler(testRequest{}), nil, HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler), func(context.Context, string) {})
-	})
-
-	fixturez.RequirePanicsWith(t, "handlerFunc without responseMarshaler must return a single value", func() {
-		NewHTTPEndpoint("POST /path", nil, NewJSONHTTPRequestUnmarshaler(testRequest{}), nil, HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler), func(context.Context, *testResponse) {})
-	})
-
-	fixturez.RequirePanicsWith(t, "handlerFunc return value must be error", func() {
-		NewHTTPEndpoint("POST /path", nil, NewJSONHTTPRequestUnmarshaler(testRequest{}), nil, HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler), func(context.Context, *testResponse) string { return "" })
-	})
-
-	fixturez.RequirePanicsWith(t, "handlerFunc with responseMarshaler must return two values", func() {
-		NewHTTPEndpoint("POST /path", nil, NewJSONHTTPRequestUnmarshaler(testRequest{}), HTTPResponseMarshalerFunc(JSONHTTPResponseMarshaler), HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler), func(context.Context, *testResponse) {})
-	})
-
-	fixturez.RequirePanicsWith(t, "handlerFunc first return value must be struct pointer", func() {
-		NewHTTPEndpoint("POST /path", nil, NewJSONHTTPRequestUnmarshaler(testRequest{}), HTTPResponseMarshalerFunc(JSONHTTPResponseMarshaler), HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler), func(context.Context, *testResponse) (string, string) { return "", "" })
-	})
-
-	fixturez.RequirePanicsWith(t, "handlerFunc second return value must be error", func() {
-		NewHTTPEndpoint("POST /path", nil, NewJSONHTTPRequestUnmarshaler(testRequest{}), HTTPResponseMarshalerFunc(JSONHTTPResponseMarshaler), HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler), func(context.Context, *testResponse) (*testResponse, string) { return nil, "" })
+	fixturez.RequirePanicsWith(t, "handlerFunc for a responseMarshaler with response type T must be func(...) (*T, error)", func() {
+		NewHTTPEndpoint("POST /path", nil, NewJSONHTTPRequestUnmarshaler(testRequest{}), NewJSONHTTPResponseMarshaler(testResponse{}), NewJSONHTTPErrorMarshaler(), func(context.Context, *testRequest) {})
 	})
 
 	fixturez.RequireNotPanics(t, func() {
-		e := NewHTTPEndpoint("POST /path", nil, nil, nil, HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler), func(context.Context) error { return nil })
+		e := NewHTTPEndpoint("POST /path", nil, NewNoBodyHTTPRequestUnmarshaler(false), NewNoBodyHTTPResponseMarshaler(), NewJSONHTTPErrorMarshaler(), func(context.Context) error { return nil })
 		require.Equal(t, &HTTPRouteKey{Raw: "POST /path", Method: Post, Path: "/path"}, e.GetRouteKey())
 	})
 
 	fixturez.RequireNotPanics(t, func() {
-		e := NewHTTPEndpoint("POST /path", nil, NewJSONHTTPRequestUnmarshaler(testRequest{}), nil, HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler), func(context.Context, *testResponse) error { return nil })
-		require.Equal(t, &HTTPRouteKey{Raw: "POST /path", Method: Post, Path: "/path"}, e.GetRouteKey())
-	})
-
-	fixturez.RequireNotPanics(t, func() {
-		e := NewHTTPEndpoint("POST /path", nil, nil, HTTPResponseMarshalerFunc(JSONHTTPResponseMarshaler), HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler), func(context.Context) (*testResponse, error) { return nil, nil })
-		require.Equal(t, &HTTPRouteKey{Raw: "POST /path", Method: Post, Path: "/path"}, e.GetRouteKey())
-	})
-
-	fixturez.RequireNotPanics(t, func() {
-		e := NewHTTPEndpoint("POST /path", nil, NewJSONHTTPRequestUnmarshaler(testRequest{}), HTTPResponseMarshalerFunc(JSONHTTPResponseMarshaler), HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler), func(context.Context, *testResponse) (*testResponse, error) { return nil, nil })
+		e := NewHTTPEndpoint("POST /path", nil, NewJSONHTTPRequestUnmarshaler(testRequest{}), NewJSONHTTPResponseMarshaler(testResponse{}), NewJSONHTTPErrorMarshaler(), func(context.Context, *testRequest) (*testResponse, error) { return nil, nil })
 		require.Equal(t, &HTTPRouteKey{Raw: "POST /path", Method: Post, Path: "/path"}, e.GetRouteKey())
 	})
 }
@@ -466,9 +470,9 @@ func (s *Suite) TestNewHTTPRouter(_ context.Context, t *testing.T) {
 	r1.SetInjector(injector)
 	require.NotNil(t, r1.injector)
 
-	e1 := NewHTTPEndpoint("POST /p1", nil, nil, nil, HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler), func(context.Context) error { return nil })
-	e2 := NewHTTPEndpoint("POST /p2", nil, nil, nil, HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler), func(context.Context) error { return nil })
-	e3 := NewHTTPEndpoint("POST /p3", nil, nil, nil, HTTPErrorMarshalerFunc(JSONHTTPErrorMarshaler), func(context.Context) error { return nil })
+	e1 := NewHTTPEndpoint("POST /p1", nil, NewNoBodyHTTPRequestUnmarshaler(false), NewNoBodyHTTPResponseMarshaler(), NewJSONHTTPErrorMarshaler(), func(context.Context) error { return nil })
+	e2 := NewHTTPEndpoint("POST /p2", nil, NewNoBodyHTTPRequestUnmarshaler(false), NewNoBodyHTTPResponseMarshaler(), NewJSONHTTPErrorMarshaler(), func(context.Context) error { return nil })
+	e3 := NewHTTPEndpoint("POST /p3", nil, NewNoBodyHTTPRequestUnmarshaler(false), NewNoBodyHTTPResponseMarshaler(), NewJSONHTTPErrorMarshaler(), func(context.Context) error { return nil })
 
 	r1.Register(e1)
 	r1.Register(e2)

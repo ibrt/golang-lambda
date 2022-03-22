@@ -31,10 +31,15 @@ const (
 )
 
 var (
-	_ HTTPRequestAuthorizer     = &staticAPIKeyHTTPRequestAuthorizer{}
-	_ HTTPRequestUnmarshaler    = &jsonHTTPRequestUnmarshaler{}
-	_ HTTPResponseMarshalerFunc = JSONHTTPResponseMarshaler
-	_ HTTPErrorMarshalerFunc    = JSONHTTPErrorMarshaler
+	_ HTTPRequestAuthorizer  = &staticAPIKeyHTTPRequestAuthorizer{}
+	_ HTTPRequestUnmarshaler = &noBodyHTTPRequestUnmarshaler{}
+	_ HTTPRequestUnmarshaler = &jsonHTTPRequestUnmarshaler{}
+	_ HTTPResponseMarshaler  = &noBodyHTTPResponseMarshaler{}
+	_ HTTPResponseMarshaler  = &jsonHTTPResponseMarshaler{}
+	_ HTTPErrorMarshaler     = &jsonHTTPErrorMarshaler{}
+
+	ctxType = reflect.TypeOf((*context.Context)(nil)).Elem()
+	errType = reflect.TypeOf((*error)(nil)).Elem()
 )
 
 // HTTPRequestContext describes the context for a HTTP request.
@@ -194,15 +199,33 @@ func (a *staticAPIKeyHTTPRequestAuthorizer) Authorize(ctx context.Context) error
 
 // HTTPRequestUnmarshaler describes an unmarshaler for a HTTP request.
 type HTTPRequestUnmarshaler interface {
+	GetRequestType() *reflect.Type
 	Unmarshal(ctx context.Context) (interface{}, error)
 }
 
-// HTTPRequestUnmarshalerFunc implements the HTTPRequestUnmarshaler interface.
-type HTTPRequestUnmarshalerFunc func(ctx context.Context) (interface{}, error)
+type noBodyHTTPRequestUnmarshaler struct {
+	isStrict bool
+}
 
-// Unmarshal a HTTP request.
-func (f HTTPRequestUnmarshalerFunc) Unmarshal(ctx context.Context) (interface{}, error) {
-	return f(ctx)
+// NewNoBodyHTTPRequestUnmarshaler initializes a new HTTPRequestUnmarshaler.
+func NewNoBodyHTTPRequestUnmarshaler(isStrict bool) HTTPRequestUnmarshaler {
+	return &noBodyHTTPRequestUnmarshaler{
+		isStrict: isStrict,
+	}
+}
+
+// GetRequestType implements the HTTPRequestUnmarshaler interface.
+func (*noBodyHTTPRequestUnmarshaler) GetRequestType() *reflect.Type {
+	return nil
+}
+
+// Unmarshal implements the HTTPRequestUnmarshaler interface.
+func (u *noBodyHTTPRequestUnmarshaler) Unmarshal(ctx context.Context) (interface{}, error) {
+	if u.isStrict && GetHTTPRequestContext(ctx).event.Body != "" {
+		return nil, NewErrBadRequest("unexpected body", errorz.Skip())
+	}
+
+	return nil, nil
 }
 
 type jsonHTTPRequestUnmarshaler struct {
@@ -266,6 +289,11 @@ func NewJSONHTTPRequestUnmarshaler(reqTemplate interface{}, options ...JSONHTTPR
 	errorz.Assertf(!u.requireExtractUser || ok, "reqTemplate must implement logz.UserExtractor")
 
 	return u
+}
+
+// GetRequestType implements the HTTPRequestUnmarshaler interface.
+func (u *jsonHTTPRequestUnmarshaler) GetRequestType() *reflect.Type {
+	return &u.reqType
 }
 
 // Unmarshal implements the HTTPRequestUnmarshaler interface.
@@ -332,26 +360,67 @@ func (u *jsonHTTPRequestUnmarshaler) Unmarshal(ctx context.Context) (interface{}
 
 // HTTPResponseMarshaler describes a marshaler for a HTTP response.
 type HTTPResponseMarshaler interface {
+	GetResponseType() *reflect.Type
 	Marshal(ctx context.Context, resp interface{}) *events.APIGatewayV2HTTPResponse
 }
 
-// HTTPResponseMarshalerFunc implements the HTTPResponseMarshaler interface.
-type HTTPResponseMarshalerFunc func(ctx context.Context, resp interface{}) *events.APIGatewayV2HTTPResponse
-
-// Marshal a HTTP response.
-func (f HTTPResponseMarshalerFunc) Marshal(ctx context.Context, resp interface{}) *events.APIGatewayV2HTTPResponse {
-	return f(ctx, resp)
+type noBodyHTTPResponseMarshaler struct {
+	// intentionally empty
 }
 
-// JSONHTTPResponseMarshaler is a HTTPResponseMarshaler.
-func JSONHTTPResponseMarshaler(ctx context.Context, resp interface{}) *events.APIGatewayV2HTTPResponse {
+// NewNoBodyHTTPResponseMarshaler initializes a new HTTPResponseMarshaler.
+func NewNoBodyHTTPResponseMarshaler() HTTPResponseMarshaler {
+	return &noBodyHTTPResponseMarshaler{}
+}
+
+// GetResponseType implements the HTTPResponseMarshaler interface.
+func (m *noBodyHTTPResponseMarshaler) GetResponseType() *reflect.Type {
+	return nil
+}
+
+// Marshal implements the HTTPResponseMarshaler interface.
+func (m *noBodyHTTPResponseMarshaler) Marshal(ctx context.Context, resp interface{}) *events.APIGatewayV2HTTPResponse {
+	errorz.Assertf(resp == nil, "resp unexpectedly not nil")
 	respCtx := GetHTTPResponseContext(ctx)
 
-	var body string
-	if resp != nil {
-		respCtx.headers.Set("Content-Type", "application/json; charset=utf-8")
-		body = jsonz.MustMarshalIndentDefaultString(resp)
+	var cookies []string
+	for _, cookie := range respCtx.cookies {
+		cookies = append(cookies, cookie.String())
 	}
+
+	return &events.APIGatewayV2HTTPResponse{
+		StatusCode:        respCtx.status,
+		MultiValueHeaders: respCtx.headers,
+		Cookies:           cookies,
+	}
+}
+
+type jsonHTTPResponseMarshaler struct {
+	respType reflect.Type
+}
+
+// NewJSONHTTPResponseMarshaler initializes a new HTTPResponseMarshaler.
+func NewJSONHTTPResponseMarshaler(respTemplate interface{}) HTTPResponseMarshaler {
+	respType := reflect.TypeOf(respTemplate)
+	errorz.Assertf(respType.Kind() == reflect.Struct, "respTemplate must be a struct")
+
+	return &jsonHTTPResponseMarshaler{
+		respType: respType,
+	}
+}
+
+// GetResponseType implements the HTTPResponseMarshaler interface.
+func (m *jsonHTTPResponseMarshaler) GetResponseType() *reflect.Type {
+	return &m.respType
+}
+
+// Marshal implements the HTTPResponseMarshaler interface.
+func (m *jsonHTTPResponseMarshaler) Marshal(ctx context.Context, resp interface{}) *events.APIGatewayV2HTTPResponse {
+	errorz.Assertf(resp != nil, "resp unexpectedly nil")
+	respCtx := GetHTTPResponseContext(ctx)
+
+	respCtx.headers.Set("Content-Type", "application/json; charset=utf-8")
+	body := jsonz.MustMarshalIndentDefaultString(resp)
 
 	var cookies []string
 	for _, cookie := range respCtx.cookies {
@@ -371,25 +440,28 @@ type HTTPErrorMarshaler interface {
 	Marshal(ctx context.Context, err error) *events.APIGatewayV2HTTPResponse
 }
 
-// HTTPErrorMarshalerFunc implements the HTTPErrorMarshaler interface.
-type HTTPErrorMarshalerFunc func(ctx context.Context, err error) *events.APIGatewayV2HTTPResponse
-
-// Marshal a HTTP error.
-func (f HTTPErrorMarshalerFunc) Marshal(ctx context.Context, err error) *events.APIGatewayV2HTTPResponse {
-	return f(ctx, err)
+type jsonHTTPErrorMarshaler struct {
+	marshaler HTTPResponseMarshaler
 }
 
-// JSONHTTPErrorMarshaler is a HTTPErrorMarshaler.
-func JSONHTTPErrorMarshaler(ctx context.Context, err error) *events.APIGatewayV2HTTPResponse {
-	respCtx := GetHTTPResponseContext(ctx)
-	errResp := errorz.ToSummary(err)
+// NewJSONHTTPErrorMarshaler initializes a new HTTPErrorMarshaler.
+func NewJSONHTTPErrorMarshaler() HTTPErrorMarshaler {
+	return &jsonHTTPErrorMarshaler{
+		marshaler: NewJSONHTTPResponseMarshaler(errorz.Summary{}),
+	}
+}
 
-	if errResp.Status == 0 {
-		errResp.Status = http.StatusInternalServerError
+// Marshal implements the HTTPErrorMarshaler interface.
+func (m *jsonHTTPErrorMarshaler) Marshal(ctx context.Context, err error) *events.APIGatewayV2HTTPResponse {
+	respCtx := GetHTTPResponseContext(ctx)
+	resp := errorz.ToSummary(err)
+
+	if resp.Status == 0 {
+		resp.Status = http.StatusInternalServerError
 	}
 
-	respCtx.SetStatus(errResp.Status.Int())
-	return JSONHTTPResponseMarshaler(ctx, errResp)
+	respCtx.SetStatus(resp.Status.Int())
+	return m.marshaler.Marshal(ctx, resp)
 }
 
 // HTTPEndpoint describes an endpoint.
@@ -411,33 +483,31 @@ func NewHTTPEndpoint(
 	errorMarshaler HTTPErrorMarshaler,
 	handlerFunc interface{}) *HTTPEndpoint {
 
+	errorz.Assertf(requestUnmarshaler != nil, "requestUnmarshaler unexpectedly nil", errorz.Skip())
+	errorz.Assertf(responseMarshaler != nil, "responseMarshaler unexpectedly nil", errorz.Skip())
 	errorz.Assertf(errorMarshaler != nil, "errorMarshaler unexpectedly nil", errorz.Skip())
 	errorz.Assertf(handlerFunc != nil, "handlerFunc unexpectedly nil", errorz.Skip())
 
 	routeKey, err := ParseHTTPRouteKey(rawRouteKey)
 	errorz.MaybeMustWrap(err, errorz.Skip())
 
-	handlerFuncType := reflect.TypeOf(handlerFunc)
-	errorz.Assertf(handlerFuncType.Kind() == reflect.Func, "handlerFunc must be a function")
+	hfType := reflect.TypeOf(handlerFunc)
+	errorz.Assertf(hfType.Kind() == reflect.Func, "handlerFunc must be a function", errorz.Skip())
 
-	if requestUnmarshaler == nil {
-		errorz.Assertf(handlerFuncType.NumIn() == 1, "handlerFunc without requestUnmarshaler must accept a single argument")
-		errorz.Assertf(handlerFuncType.In(0) == reflect.TypeOf((*context.Context)(nil)).Elem(), "handlerFunc argument must be context.Context")
+	if reqType := requestUnmarshaler.GetRequestType(); reqType == nil {
+		errorz.Assertf(hfType.NumIn() == 1 && hfType.In(0) == ctxType,
+			"handlerFunc for a requestUnmarshaler with no request type must be func(context.Context) (...)", errorz.Skip())
 	} else {
-		errorz.Assertf(handlerFuncType.NumIn() == 2, "handlerFunc with requestUnmarshaler must accept two arguments")
-		errorz.Assertf(handlerFuncType.In(0) == reflect.TypeOf((*context.Context)(nil)).Elem(), "handlerFunc first argument must be context.Context")
-		errorz.Assertf(handlerFuncType.In(1).Kind() == reflect.Ptr, "handlerFunc second argument must be a struct pointer")
-		errorz.Assertf(handlerFuncType.In(1).Elem().Kind() == reflect.Struct, "handlerFunc second argument must be a struct pointer")
+		errorz.Assertf(hfType.NumIn() == 2 && hfType.In(0) == ctxType && hfType.In(1) == reflect.PtrTo(*reqType),
+			"handlerFunc for a requestUnmarshaler with request type T must be func(context.Context, *T) (...)", errorz.Skip())
 	}
 
-	if responseMarshaler == nil {
-		errorz.Assertf(handlerFuncType.NumOut() == 1, "handlerFunc without responseMarshaler must return a single value")
-		errorz.Assertf(handlerFuncType.Out(0) == reflect.TypeOf((*error)(nil)).Elem(), "handlerFunc return value must be error")
+	if respType := responseMarshaler.GetResponseType(); respType == nil {
+		errorz.Assertf(hfType.NumOut() == 1 && hfType.Out(0) == errType,
+			"handlerFunc for a responseMarshaler with no response type must be func(...) error", errorz.Skip())
 	} else {
-		errorz.Assertf(handlerFuncType.NumOut() == 2, "handlerFunc with responseMarshaler must return two values")
-		errorz.Assertf(handlerFuncType.Out(0).Kind() == reflect.Ptr, "handlerFunc first return value must be struct pointer")
-		errorz.Assertf(handlerFuncType.Out(0).Elem().Kind() == reflect.Struct, "handlerFunc first return value must be struct pointer")
-		errorz.Assertf(handlerFuncType.Out(1) == reflect.TypeOf((*error)(nil)).Elem(), "handlerFunc second return value must be error")
+		errorz.Assertf(hfType.NumOut() == 2 && hfType.Out(0) == reflect.PtrTo(*respType) && hfType.Out(1) == errType,
+			"handlerFunc for a responseMarshaler with response type T must be func(...) (*T, error)", errorz.Skip())
 	}
 
 	e := &HTTPEndpoint{
@@ -476,15 +546,33 @@ func (e *HTTPEndpoint) handle(ctx context.Context) (resp interface{}, err error)
 		return nil, errorz.Wrap(err, errorz.Skip())
 	}
 
+	if e.requestUnmarshaler.GetRequestType() == nil {
+		errorz.Assertf(req == nil, "req unexpectedly not nil", errorz.Skip())
+	} else {
+		errorz.Assertf(req != nil, "req unexpectedly nil", errorz.Skip())
+	}
+
 	resp, err = e.invoke(ctx, req)
-	return resp, errorz.MaybeWrap(err, errorz.Skip())
+	if err != nil {
+		return nil, errorz.Wrap(err, errorz.Skip())
+	}
+
+	if e.responseMarshaler.GetResponseType() == nil {
+		errorz.Assertf(resp == nil, "resp unexpectedly not nil", errorz.Skip())
+		return nil, nil
+	}
+
+	errorz.Assertf(resp != nil, "resp unexpectedly nil", errorz.Skip())
+	return resp, nil
 }
 
 func (e *HTTPEndpoint) invoke(ctx context.Context, req interface{}) (interface{}, error) {
-	ret := reflect.ValueOf(e.handlerFunc).Call([]reflect.Value{
-		reflect.ValueOf(ctx),
-		reflect.ValueOf(req),
-	})
+	args := []reflect.Value{reflect.ValueOf(ctx)}
+	if e.requestUnmarshaler.GetRequestType() != nil {
+		args = append(args, reflect.ValueOf(req))
+	}
+
+	ret := reflect.ValueOf(e.handlerFunc).Call(args)
 
 	vErr := ret[len(ret)-1]
 	if err, ok := vErr.Interface().(error); ok && err != nil {
@@ -513,7 +601,7 @@ func NewHTTPRouter() *HTTPRouter {
 
 // Register registers an endpoint.
 func (r *HTTPRouter) Register(endpoint *HTTPEndpoint) *HTTPRouter {
-	errorz.Assertf(r.endpoints[endpoint.routeKey.Raw] == nil, "route key already registered: %v", errorz.A(endpoint.routeKey.Raw))
+	errorz.Assertf(r.endpoints[endpoint.routeKey.Raw] == nil, "route key already registered: %v", errorz.A(endpoint.routeKey.Raw), errorz.Skip())
 	r.endpoints[endpoint.routeKey.Raw] = endpoint
 	return r
 }
@@ -632,10 +720,16 @@ func (r *HTTPRouter) prepareContext(ctx context.Context, event *events.APIGatewa
 
 	ctx, release := logz.Get(ctx).TraceHTTPRequestServer(syntheticHTTPReq, syntheticBody)
 
-	logz.Get(ctx).AddMetadata("Request Context", event.RequestContext)
-	logz.Get(ctx).AddMetadata("Query String Parameters", event.QueryStringParameters)
-	logz.Get(ctx).AddMetadata("Path Parameters", event.PathParameters)
-	logz.Get(ctx).AddMetadata("Stage Variables", event.StageVariables)
+	func() {
+		defer func() {
+			recover()
+		}()
+
+		logz.Get(ctx).AddMetadata("Request Context", event.RequestContext)
+		logz.Get(ctx).AddMetadata("Query String Parameters", event.QueryStringParameters)
+		logz.Get(ctx).AddMetadata("Path Parameters", event.PathParameters)
+		logz.Get(ctx).AddMetadata("Stage Variables", event.StageVariables)
+	}()
 
 	return ctx, release
 }
