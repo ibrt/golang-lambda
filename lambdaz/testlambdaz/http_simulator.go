@@ -47,7 +47,7 @@ func (c *HTTPSimulatorConfig) MustValidate() {
 
 // HTTPSimulatorConfigRoute describes part of the HTTP simulator config.
 type HTTPSimulatorConfigRoute struct {
-	IntegrationName string `json:"name"`
+	IntegrationName string `json:"integrationName"`
 }
 
 // HTTPSimulatorConfigAWSProxyIntegration describes part of the HTTP simulator config.

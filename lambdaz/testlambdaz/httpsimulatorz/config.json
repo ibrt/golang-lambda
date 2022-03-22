@@ -1,0 +1,12 @@
+{
+  "routes": {
+    "POST /p1/{pk}": {
+      "integrationName": "function"
+    }
+  },
+  "awsProxyIntegrations": {
+    "function": {
+      "url": "http://localhost:1234"
+    }
+  }
+}
