@@ -26,18 +26,26 @@ type contextKey int
 const (
 	httpRequestContextKey contextKey = iota
 	httpResponseContextKey
+
+	staticAPIKeyHeader = "x-api-key"
 )
 
 var (
 	_ HTTPRequestAuthorizer     = &staticAPIKeyHTTPRequestAuthorizer{}
-	_ HTTPRequestUnmarshaler    = &restHTTPRequestUnmarshaler{}
-	_ HTTPResponseMarshalerFunc = RestHTTPResponseMarshaler
-	_ HTTPErrorMarshalerFunc    = RestHTTPErrorMarshaler
+	_ HTTPRequestUnmarshaler    = &jsonHTTPRequestUnmarshaler{}
+	_ HTTPResponseMarshalerFunc = JSONHTTPResponseMarshaler
+	_ HTTPErrorMarshalerFunc    = JSONHTTPErrorMarshaler
 )
 
 // HTTPRequestContext describes the context for a HTTP request.
 type HTTPRequestContext struct {
 	event *events.APIGatewayV2HTTPRequest
+}
+
+func newHTTPRequestContext(event *events.APIGatewayV2HTTPRequest) *HTTPRequestContext {
+	return &HTTPRequestContext{
+		event: event,
+	}
 }
 
 // GetHTTPRequestContext extracts the *HTTPRequestContext from context, panics on error.
@@ -55,6 +63,13 @@ type HTTPResponseContext struct {
 	status  int
 	headers http.Header
 	cookies []http.Cookie
+}
+
+func newHTTPResponseContext() *HTTPResponseContext {
+	return &HTTPResponseContext{
+		status:  http.StatusOK,
+		headers: http.Header{},
+	}
 }
 
 // GetHTTPResponseContext extracts the *HTTPResponseContext from context, panics on error.
@@ -83,7 +98,7 @@ type HTTPMethod string
 // Valid implements the vz.SimpleValidator interface.
 func (m HTTPMethod) Valid() bool {
 	switch m {
-	case Delete, Get, Head, Options, Patch, Post, Put:
+	case Any, Delete, Get, Head, Options, Patch, Post, Put:
 		return true
 	default:
 		return false
@@ -97,6 +112,7 @@ func (m HTTPMethod) String() string {
 
 // Known HTTP methods.
 const (
+	Any     HTTPMethod = "ANY"
 	Delete  HTTPMethod = "DELETE"
 	Get     HTTPMethod = "GET"
 	Head    HTTPMethod = "HEAD"
@@ -108,15 +124,20 @@ const (
 
 // HTTPRouteKey describes a parsed HTTP route key.
 type HTTPRouteKey struct {
-	Raw    string
-	Method HTTPMethod
-	Path   string
+	Raw       string
+	IsDefault bool
+	Method    HTTPMethod
+	Path      string
 }
 
-// ParseHTTPRouteKey parses a HTTP route key. Note that the parsing logic is not particularly strict.
+// ParseHTTPRouteKey parses a HTTP route key.
+// Note that the parsing logic is not particularly strict, rather designed to prevent accidental mistakes.
 func ParseHTTPRouteKey(rawRouteKey string) (*HTTPRouteKey, error) {
 	if rawRouteKey == "$default" {
-		return nil, errorz.Errorf("$default route key is not (yet) supported", errorz.Skip())
+		return &HTTPRouteKey{
+			Raw:       rawRouteKey,
+			IsDefault: true,
+		}, nil
 	}
 
 	parts := strings.SplitN(rawRouteKey, " ", 2)
@@ -129,15 +150,10 @@ func ParseHTTPRouteKey(rawRouteKey string) (*HTTPRouteKey, error) {
 		return nil, errorz.Errorf("invalid route key: invalid method: %v", errorz.A(method), errorz.Skip())
 	}
 
-	path := parts[1]
-	if strings.Contains(path, "{proxy+}") {
-		return nil, errorz.Errorf("{proxy+} path parameter is not (yet) supported", errorz.Skip())
-	}
-
 	return &HTTPRouteKey{
 		Raw:    rawRouteKey,
 		Method: method,
-		Path:   path,
+		Path:   parts[1],
 	}, nil
 }
 
@@ -167,7 +183,7 @@ func NewStaticAPIKeyHTTPRequestAuthorizer(apiKey string) HTTPRequestAuthorizer {
 
 // Authorize implements the HTTPRequestAuthorizer interface.
 func (a *staticAPIKeyHTTPRequestAuthorizer) Authorize(ctx context.Context) error {
-	if apiKey := GetHTTPRequestContext(ctx).event.Headers["x-api-key"]; apiKey == "" {
+	if apiKey := GetHTTPRequestContext(ctx).event.Headers[staticAPIKeyHeader]; apiKey == "" {
 		return NewErrUnauthorized("missing API key", errorz.Skip())
 	} else if apiKey != a.apiKey {
 		return NewErrUnauthorized("invalid API key", errorz.Skip())
@@ -189,7 +205,7 @@ func (f HTTPRequestUnmarshalerFunc) Unmarshal(ctx context.Context) (interface{},
 	return f(ctx)
 }
 
-type restHTTPRequestUnmarshaler struct {
+type jsonHTTPRequestUnmarshaler struct {
 	unmarshalBody                  bool
 	unmarshalQueryStringParameters bool
 	unmarshalPathParameters        bool
@@ -199,38 +215,38 @@ type restHTTPRequestUnmarshaler struct {
 	schemaDecoder *schema.Decoder
 }
 
-// RestHTTPRequestUnmarshalerOption describe an option for restHTTPRequestUnmarshaler.
-type RestHTTPRequestUnmarshalerOption func(u *restHTTPRequestUnmarshaler)
+// JSONHTTPRequestUnmarshalerOption describe an option for jsonHTTPRequestUnmarshaler.
+type JSONHTTPRequestUnmarshalerOption func(u *jsonHTTPRequestUnmarshaler)
 
-// NoUnmarshalBody describes a RestHTTPRequestUnmarshalerOption.
-func NoUnmarshalBody(u *restHTTPRequestUnmarshaler) {
+// NoUnmarshalBody describes a JSONHTTPRequestUnmarshalerOption.
+func NoUnmarshalBody(u *jsonHTTPRequestUnmarshaler) {
 	u.unmarshalBody = false
 }
 
-// NoUnmarshalQueryStringParameters describes a RestHTTPRequestUnmarshalerOption.
-func NoUnmarshalQueryStringParameters(u *restHTTPRequestUnmarshaler) {
+// NoUnmarshalQueryStringParameters describes a JSONHTTPRequestUnmarshalerOption.
+func NoUnmarshalQueryStringParameters(u *jsonHTTPRequestUnmarshaler) {
 	u.unmarshalQueryStringParameters = false
 }
 
-// NoUnmarshalPathParameters describes a RestHTTPRequestUnmarshalerOption.
-func NoUnmarshalPathParameters(u *restHTTPRequestUnmarshaler) {
+// NoUnmarshalPathParameters describes a JSONHTTPRequestUnmarshalerOption.
+func NoUnmarshalPathParameters(u *jsonHTTPRequestUnmarshaler) {
 	u.unmarshalPathParameters = false
 }
 
-// RequireExtractUser describes a RestHTTPRequestUnmarshalerOption.
-func RequireExtractUser(u *restHTTPRequestUnmarshaler) {
+// RequireExtractUser describes a JSONHTTPRequestUnmarshalerOption.
+func RequireExtractUser(u *jsonHTTPRequestUnmarshaler) {
 	u.requireExtractUser = true
 }
 
-// NewRestHTTPRequestUnmarshaler initializes a new HTTPRequestUnmarshaler.
-func NewRestHTTPRequestUnmarshaler(reqTemplate interface{}, options ...RestHTTPRequestUnmarshalerOption) HTTPRequestUnmarshaler {
+// NewJSONHTTPRequestUnmarshaler initializes a new HTTPRequestUnmarshaler.
+func NewJSONHTTPRequestUnmarshaler(reqTemplate interface{}, options ...JSONHTTPRequestUnmarshalerOption) HTTPRequestUnmarshaler {
 	reqType := reflect.TypeOf(reqTemplate)
 	reqValue := reflect.New(reqType).Interface()
 
 	errorz.Assertf(reqType.Kind() == reflect.Struct, "reqTemplate must be a struct")
 	errorz.Assertf(vz.IsValidatable(reqValue), "reqTemplate must implement vz.Validator or vz.SimpleValidator")
 
-	u := &restHTTPRequestUnmarshaler{
+	u := &jsonHTTPRequestUnmarshaler{
 		unmarshalBody:                  true,
 		unmarshalQueryStringParameters: true,
 		unmarshalPathParameters:        true,
@@ -253,7 +269,7 @@ func NewRestHTTPRequestUnmarshaler(reqTemplate interface{}, options ...RestHTTPR
 }
 
 // Unmarshal implements the HTTPRequestUnmarshaler interface.
-func (u *restHTTPRequestUnmarshaler) Unmarshal(ctx context.Context) (interface{}, error) {
+func (u *jsonHTTPRequestUnmarshaler) Unmarshal(ctx context.Context) (interface{}, error) {
 	event := GetHTTPRequestContext(ctx).event
 	req := reflect.New(u.reqType).Interface()
 
@@ -290,7 +306,7 @@ func (u *restHTTPRequestUnmarshaler) Unmarshal(ctx context.Context) (interface{}
 		}
 	}
 
-	if u.unmarshalPathParameters && len(event.PathParameters) == 0 {
+	if u.unmarshalPathParameters && len(event.PathParameters) > 0 {
 		values := url.Values{}
 
 		for k, v := range event.PathParameters {
@@ -327,8 +343,8 @@ func (f HTTPResponseMarshalerFunc) Marshal(ctx context.Context, resp interface{}
 	return f(ctx, resp)
 }
 
-// RestHTTPResponseMarshaler is a HTTPResponseMarshaler.
-func RestHTTPResponseMarshaler(ctx context.Context, resp interface{}) *events.APIGatewayV2HTTPResponse {
+// JSONHTTPResponseMarshaler is a HTTPResponseMarshaler.
+func JSONHTTPResponseMarshaler(ctx context.Context, resp interface{}) *events.APIGatewayV2HTTPResponse {
 	respCtx := GetHTTPResponseContext(ctx)
 
 	var body string
@@ -363,8 +379,8 @@ func (f HTTPErrorMarshalerFunc) Marshal(ctx context.Context, err error) *events.
 	return f(ctx, err)
 }
 
-// RestHTTPErrorMarshaler is a HTTPErrorMarshaler.
-func RestHTTPErrorMarshaler(ctx context.Context, err error) *events.APIGatewayV2HTTPResponse {
+// JSONHTTPErrorMarshaler is a HTTPErrorMarshaler.
+func JSONHTTPErrorMarshaler(ctx context.Context, err error) *events.APIGatewayV2HTTPResponse {
 	respCtx := GetHTTPResponseContext(ctx)
 	errResp := errorz.ToSummary(err)
 
@@ -373,7 +389,7 @@ func RestHTTPErrorMarshaler(ctx context.Context, err error) *events.APIGatewayV2
 	}
 
 	respCtx.SetStatus(errResp.Status.Int())
-	return RestHTTPResponseMarshaler(ctx, errResp)
+	return JSONHTTPResponseMarshaler(ctx, errResp)
 }
 
 // HTTPEndpoint describes an endpoint.
@@ -441,174 +457,31 @@ func (e *HTTPEndpoint) GetRouteKey() *HTTPRouteKey {
 	return e.routeKey
 }
 
-// Router implements a request router.
-type Router struct {
-	injector  injectz.Injector
-	endpoints map[string]*HTTPEndpoint
-}
-
-// NewRouter initializes a new router.
-func NewRouter() *Router {
-	return &Router{
-		endpoints: make(map[string]*HTTPEndpoint),
-	}
-}
-
-// Register registers an endpoint.
-func (r *Router) Register(endpoint *HTTPEndpoint) *Router {
-	errorz.Assertf(r.endpoints[endpoint.routeKey.Raw] == nil, "route key already registered: %v", errorz.A(endpoint.routeKey))
-	r.endpoints[endpoint.routeKey.Raw] = endpoint
-	return r
-}
-
-// SetInjector sets the (optional) context injector.
-func (r *Router) SetInjector(injector injectz.Injector) *Router {
-	r.injector = injector
-	return r
-}
-
-// GetEndpoints gets a slice of registered endpoints.
-func (r *Router) GetEndpoints() []*HTTPEndpoint {
-	endpoints := make([]*HTTPEndpoint, 0, len(r.endpoints))
-	for _, endpoint := range r.endpoints {
-		endpoints = append(endpoints, endpoint)
-	}
-
-	sort.Slice(endpoints, func(i, j int) bool {
-		return endpoints[i].routeKey.Raw < endpoints[j].routeKey.Raw
-	})
-
-	return endpoints
-}
-
-// Handler provides a handler function that can be registered with the Lambda SDK.
-func (r *Router) Handler(ctx context.Context, event events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
-	if r.injector != nil {
-		ctx = r.injector(ctx)
-	}
-
-	ctx = context.WithValue(ctx, httpRequestContextKey, &HTTPRequestContext{
-		event: &event,
-	})
-
-	ctx = context.WithValue(ctx, httpResponseContextKey, &HTTPResponseContext{
-		status:  http.StatusOK,
-		headers: http.Header{},
-		cookies: nil,
-	})
-
-	ctx, releaseTransaction := logz.Get(ctx).TraceHTTPRequestServer(r.eventToSyntheticHTTPRequest(&event))
-	defer releaseTransaction()
-	r.addEventMetadata(ctx, &event)
-
-	endpoint, ok := r.endpoints[event.RouteKey]
-	if !ok {
-		// Note: this is not really a "not found". More like a misconfiguration between the router and he API.
-		err := errorz.Errorf("unknown route key: %v", errorz.A(event.RouteKey))
-		logz.Get(ctx).Error(err)
-		return events.APIGatewayV2HTTPResponse{}, err
-	}
-
-	resp, err := func() (resp interface{}, err error) {
-		defer func() {
-			if rErr := errorz.MaybeWrapRecover(recover()); rErr != nil {
-				resp = nil
-				err = rErr
-			}
-			if err != nil {
-				logz.Get(ctx).Error(err)
-			}
-		}()
-
-		if endpoint.requestAuthorizer != nil {
-			if err := endpoint.requestAuthorizer.Authorize(ctx); err != nil {
-				return nil, errorz.Wrap(err)
-			}
+func (e *HTTPEndpoint) handle(ctx context.Context) (resp interface{}, err error) {
+	defer func() {
+		if rErr := errorz.MaybeWrapRecover(recover()); rErr != nil {
+			resp = nil
+			err = rErr
 		}
-
-		req, err := endpoint.requestUnmarshaler.Unmarshal(ctx)
-		if err != nil {
-			return nil, errorz.Wrap(err)
-		}
-
-		return r.invoke(ctx, endpoint.handlerFunc, req)
 	}()
 
-	if err != nil {
-		logz.Get(ctx).Error(err)
-		return *endpoint.errorMarshaler.Marshal(ctx, err), nil
-	}
-
-	return *endpoint.responseMarshaler.Marshal(ctx, resp), nil
-}
-
-// ShallowClone returns a shallow clone of the router.
-func (r *Router) ShallowClone() *Router {
-	endpoints := make(map[string]*HTTPEndpoint, len(r.endpoints))
-	for k, v := range r.endpoints {
-		endpoints[k] = v
-	}
-	return &Router{
-		injector:  r.injector,
-		endpoints: endpoints,
-	}
-}
-
-func (r *Router) eventToSyntheticHTTPRequest(event *events.APIGatewayV2HTTPRequest) (*http.Request, []byte) {
-	// TODO(ibrt): Add a little bit of complexity to avoid double parsing the request and figure out if there's a less
-	// iffy way to achieve this, given that Sentry events hold a parsed request but scopes want a *http.Request.
-
-	routeKey, err := ParseHTTPRouteKey(event.RouteKey)
-	if err != nil {
-		routeKey = &HTTPRouteKey{
-			Method: HTTPMethod(event.RequestContext.HTTP.Method),
-			Path:   event.RequestContext.HTTP.Path,
+	if e.requestAuthorizer != nil {
+		if err := e.requestAuthorizer.Authorize(ctx); err != nil {
+			return nil, errorz.Wrap(err, errorz.Skip())
 		}
 	}
 
-	var body []byte
-
-	if event.Body != "" {
-		if event.IsBase64Encoded {
-			if decBody, err := base64.StdEncoding.DecodeString(event.Body); err == nil {
-				body = decBody
-			} else {
-				body = []byte(event.Body)
-			}
-		} else {
-			body = []byte(event.Body)
-		}
+	req, err := e.requestUnmarshaler.Unmarshal(ctx)
+	if err != nil {
+		return nil, errorz.Wrap(err, errorz.Skip())
 	}
 
-	httpReq, err := http.NewRequest(
-		routeKey.Method.String(),
-		fmt.Sprintf("https://%v%v", event.RequestContext.DomainName, routeKey.Path),
-		nil)
-	errorz.MaybeMustWrap(err)
-	httpReq.RemoteAddr = event.RequestContext.HTTP.SourceIP
-
-	if len(event.Cookies) > 0 {
-		httpReq.Header.Set("Cookie", event.Cookies[0])
-	}
-
-	for k, v := range event.Headers {
-		httpReq.Header.Set(k, v)
-	}
-
-	return httpReq, body
+	resp, err = e.invoke(ctx, req)
+	return resp, errorz.MaybeWrap(err, errorz.Skip())
 }
 
-func (r *Router) addEventMetadata(ctx context.Context, event *events.APIGatewayV2HTTPRequest) {
-	logs := logz.Get(ctx)
-
-	logs.AddMetadata("Request Context", event.RequestContext)
-	logs.AddMetadata("Query String Parameters", event.QueryStringParameters)
-	logs.AddMetadata("Path Parameters", event.PathParameters)
-	logs.AddMetadata("Stage Variables", event.StageVariables)
-}
-
-func (r *Router) invoke(ctx context.Context, handlerFunc, req interface{}) (interface{}, error) {
-	ret := reflect.ValueOf(handlerFunc).Call([]reflect.Value{
+func (e *HTTPEndpoint) invoke(ctx context.Context, req interface{}) (interface{}, error) {
+	ret := reflect.ValueOf(e.handlerFunc).Call([]reflect.Value{
 		reflect.ValueOf(ctx),
 		reflect.ValueOf(req),
 	})
@@ -623,4 +496,146 @@ func (r *Router) invoke(ctx context.Context, handlerFunc, req interface{}) (inte
 	}
 
 	return nil, nil
+}
+
+// HTTPRouter implements a HTTP router.
+type HTTPRouter struct {
+	injector  injectz.Injector
+	endpoints map[string]*HTTPEndpoint
+}
+
+// NewHTTPRouter initializes a new HTTPRouter.
+func NewHTTPRouter() *HTTPRouter {
+	return &HTTPRouter{
+		endpoints: make(map[string]*HTTPEndpoint),
+	}
+}
+
+// Register registers an endpoint.
+func (r *HTTPRouter) Register(endpoint *HTTPEndpoint) *HTTPRouter {
+	errorz.Assertf(r.endpoints[endpoint.routeKey.Raw] == nil, "route key already registered: %v", errorz.A(endpoint.routeKey.Raw))
+	r.endpoints[endpoint.routeKey.Raw] = endpoint
+	return r
+}
+
+// SetInjector sets the (optional) context injector.
+func (r *HTTPRouter) SetInjector(injector injectz.Injector) *HTTPRouter {
+	r.injector = injector
+	return r
+}
+
+// GetEndpoints gets a slice of registered endpoints.
+func (r *HTTPRouter) GetEndpoints() []*HTTPEndpoint {
+	endpoints := make([]*HTTPEndpoint, 0, len(r.endpoints))
+	for _, endpoint := range r.endpoints {
+		endpoints = append(endpoints, endpoint)
+	}
+
+	sort.Slice(endpoints, func(i, j int) bool {
+		return endpoints[i].routeKey.Raw < endpoints[j].routeKey.Raw
+	})
+
+	return endpoints
+}
+
+// Handler provides a handler function that can be registered with the Lambda SDK.
+func (r *HTTPRouter) Handler(ctx context.Context, event events.APIGatewayV2HTTPRequest) (hEvent events.APIGatewayV2HTTPResponse, hErr error) {
+	ctx, finish := r.prepareContext(ctx, &event)
+	defer finish()
+
+	defer func() {
+		if rErr := errorz.MaybeWrapRecover(recover()); rErr != nil {
+			hEvent = events.APIGatewayV2HTTPResponse{}
+			hErr = rErr
+		}
+		if hErr != nil {
+			logz.Get(ctx).Error(hErr)
+		}
+	}()
+
+	endpoint, ok := r.endpoints[event.RouteKey]
+	if !ok {
+		// Note: this is not really a "not found" - it is a misconfiguration between the router and he API.
+		err := errorz.Errorf("unknown route key: %v", errorz.A(event.RouteKey), errorz.Skip())
+		logz.Get(ctx).Error(err)
+		return events.APIGatewayV2HTTPResponse{}, err
+	}
+
+	resp, err := endpoint.handle(ctx)
+	if err != nil {
+		logz.Get(ctx).Error(err)
+		return *endpoint.errorMarshaler.Marshal(ctx, err), nil
+	}
+
+	return *endpoint.responseMarshaler.Marshal(ctx, resp), nil
+}
+
+// ShallowClone returns a shallow clone of the router.
+func (r *HTTPRouter) ShallowClone() *HTTPRouter {
+	endpoints := make(map[string]*HTTPEndpoint, len(r.endpoints))
+	for k, v := range r.endpoints {
+		endpoints[k] = v
+	}
+	return &HTTPRouter{
+		injector:  r.injector,
+		endpoints: endpoints,
+	}
+}
+
+func (r *HTTPRouter) prepareContext(ctx context.Context, event *events.APIGatewayV2HTTPRequest) (context.Context, func()) {
+	if r.injector != nil {
+		ctx = r.injector(ctx)
+	}
+
+	ctx = context.WithValue(ctx, httpRequestContextKey, newHTTPRequestContext(event))
+	ctx = context.WithValue(ctx, httpResponseContextKey, newHTTPResponseContext())
+
+	routeKey, err := ParseHTTPRouteKey(event.RouteKey)
+	if err != nil || routeKey.IsDefault {
+		routeKey = &HTTPRouteKey{
+			Raw:    event.RouteKey,
+			Method: HTTPMethod(event.RequestContext.HTTP.Method),
+			Path:   event.RequestContext.HTTP.Path,
+		}
+	}
+	if routeKey.Method == Any {
+		routeKey.Method = HTTPMethod(event.RequestContext.HTTP.Method)
+	}
+
+	var syntheticBody []byte
+
+	if event.Body != "" {
+		if event.IsBase64Encoded {
+			if decBody, err := base64.StdEncoding.DecodeString(event.Body); err == nil {
+				syntheticBody = decBody
+			} else {
+				syntheticBody = []byte(event.Body)
+			}
+		} else {
+			syntheticBody = []byte(event.Body)
+		}
+	}
+
+	syntheticURL := fmt.Sprintf("https://%v%v", event.RequestContext.DomainName, routeKey.Path)
+	syntheticHTTPReq, err := http.NewRequest(routeKey.Method.String(), syntheticURL, nil)
+	errorz.MaybeMustWrap(err)
+
+	syntheticHTTPReq.RemoteAddr = event.RequestContext.HTTP.SourceIP
+
+	if len(event.Cookies) > 0 {
+		syntheticHTTPReq.Header.Set("Cookie", event.Cookies[0])
+	}
+
+	for k, v := range event.Headers {
+		syntheticHTTPReq.Header.Set(k, v)
+	}
+
+	ctx, release := logz.Get(ctx).TraceHTTPRequestServer(syntheticHTTPReq, syntheticBody)
+
+	logz.Get(ctx).AddMetadata("Request Context", event.RequestContext)
+	logz.Get(ctx).AddMetadata("Query String Parameters", event.QueryStringParameters)
+	logz.Get(ctx).AddMetadata("Path Parameters", event.PathParameters)
+	logz.Get(ctx).AddMetadata("Stage Variables", event.StageVariables)
+
+	return ctx, release
 }
