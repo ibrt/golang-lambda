@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -13,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
+	"github.com/getsentry/sentry-go"
 	"github.com/gorilla/schema"
 	"github.com/ibrt/golang-bites/jsonz"
 	"github.com/ibrt/golang-errors/errorz"
@@ -690,45 +690,31 @@ func (r *HTTPRouter) prepareContext(ctx context.Context, event *events.APIGatewa
 		routeKey.Method = HTTPMethod(event.RequestContext.HTTP.Method)
 	}
 
-	var syntheticBody []byte
-
-	if event.Body != "" {
-		if event.IsBase64Encoded {
-			if decBody, err := base64.StdEncoding.DecodeString(event.Body); err == nil {
-				syntheticBody = decBody
-			} else {
-				syntheticBody = []byte(event.Body)
+	ctx, release := logz.Get(ctx).TraceHTTPRequestServerSimple(&sentry.Request{
+		URL:         routeKey.Path,
+		Method:      routeKey.Method.String(),
+		Data:        event.Body,
+		QueryString: event.RawQueryString,
+		Cookies: func() string {
+			if len(event.Cookies) > 0 {
+				return event.Cookies[0]
 			}
-		} else {
-			syntheticBody = []byte(event.Body)
-		}
-	}
-
-	syntheticURL := fmt.Sprintf("https://%v%v", event.RequestContext.DomainName, routeKey.Path)
-	syntheticHTTPReq, err := http.NewRequest(routeKey.Method.String(), syntheticURL, nil)
-	errorz.MaybeMustWrap(err)
-
-	syntheticHTTPReq.RemoteAddr = event.RequestContext.HTTP.SourceIP
-
-	if len(event.Cookies) > 0 {
-		syntheticHTTPReq.Header.Set("Cookie", event.Cookies[0])
-	}
-
-	for k, v := range event.Headers {
-		syntheticHTTPReq.Header.Set(k, v)
-	}
-
-	ctx, release := logz.Get(ctx).TraceHTTPRequestServer(syntheticHTTPReq, syntheticBody)
+			return ""
+		}(),
+		Headers: event.Headers,
+		Env: map[string]string{
+			"REMOTE_ADDR": event.RequestContext.HTTP.SourceIP,
+		},
+	})
 
 	func() {
 		defer func() {
 			recover()
 		}()
 
-		logz.Get(ctx).AddMetadata("Request Context", event.RequestContext)
-		logz.Get(ctx).AddMetadata("Query String Parameters", event.QueryStringParameters)
-		logz.Get(ctx).AddMetadata("Path Parameters", event.PathParameters)
-		logz.Get(ctx).AddMetadata("Stage Variables", event.StageVariables)
+		logz.Get(ctx).AddMetadata("requestContext", event.RequestContext)
+		logz.Get(ctx).AddMetadata("pathParameters", event.PathParameters)
+		logz.Get(ctx).AddMetadata("stageVariables", event.StageVariables)
 	}()
 
 	return ctx, release

@@ -8,12 +8,14 @@ import (
 	"testing"
 
 	"github.com/aws/aws-lambda-go/events"
+	"github.com/getsentry/sentry-go"
 	"github.com/golang/mock/gomock"
 	"github.com/ibrt/golang-bites/jsonz"
 	"github.com/ibrt/golang-errors/errorz"
 	"github.com/ibrt/golang-fixtures/fixturez"
 	"github.com/ibrt/golang-inject-logs/logz"
 	"github.com/ibrt/golang-inject-logs/logz/testlogz"
+	"github.com/ibrt/golang-inject/injectz"
 	"github.com/ibrt/golang-validation/vz"
 	"github.com/stretchr/testify/require"
 )
@@ -523,84 +525,33 @@ func (s *Suite) TestHTTPRouter_PrepareContext(ctx context.Context, t *testing.T)
 		IsBase64Encoded: false,
 	}
 
-	var cReq *http.Request
-	var cReqBody []byte
-
-	s.Logs.Mock.EXPECT().TraceHTTPRequestServer(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, req *http.Request, reqBody []byte) (context.Context, func()) {
+	var cReq *sentry.Request
+	s.Logs.Mock.EXPECT().TraceHTTPRequestServerSimple(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, req *sentry.Request) (context.Context, func()) {
 		cReq = req
-		cReqBody = reqBody
 		return ctx, func() {}
 	})
 
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Request Context"), gomock.Any())
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Query String Parameters"), gomock.Any())
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Path Parameters"), gomock.Any())
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Stage Variables"), gomock.Any())
+	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("requestContext"), gomock.Any())
+	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("pathParameters"), gomock.Any())
+	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("stageVariables"), gomock.Any())
 
-	ctx, _ = NewHTTPRouter().prepareContext(ctx, event)
+	ctx, _ = NewHTTPRouter().SetInjector(injectz.NewNoopInjector()).prepareContext(ctx, event)
 	require.Equal(t, newHTTPRequestContext(event), GetHTTPRequestContext(ctx))
 	require.Equal(t, newHTTPResponseContext(), GetHTTPResponseContext(ctx))
 
-	require.Equal(t, "POST", cReq.Method)
-	require.Equal(t, "https:///p1/%7Bpk1%7D", cReq.URL.String())
-	require.Equal(t, []byte(`{ "bk1": "bv1" }`), cReqBody)
-}
-
-func (s *Suite) TestHTTPRouter_PrepareContext_RouteKeyAny(ctx context.Context, t *testing.T) {
-	event := &events.APIGatewayV2HTTPRequest{
-		RouteKey:       "ANY /p1/{pk1}",
-		RawPath:        "/p1/pv1",
-		RawQueryString: "qs1=qv1",
-		Cookies: []string{
-			"name=",
-		},
+	require.Equal(t, &sentry.Request{
+		URL:         "/p1/{pk1}",
+		Method:      "POST",
+		Data:        `{ "bk1": "bv1" }`,
+		QueryString: "qs1=qv1",
+		Cookies:     "name=",
 		Headers: map[string]string{
 			"Content-Type": "application/json; charset=utf-8",
 		},
-		QueryStringParameters: map[string]string{
-			"qs1": "qv1",
+		Env: map[string]string{
+			"REMOTE_ADDR": "1.2.3.4",
 		},
-		PathParameters: map[string]string{
-			"pk1": "pv1",
-		},
-		RequestContext: events.APIGatewayV2HTTPRequestContext{
-			RouteKey: "POST /p1/{pk1",
-			HTTP: events.APIGatewayV2HTTPRequestContextHTTPDescription{
-				Method:    "POST",
-				Path:      "/p1/pv1",
-				Protocol:  "HTTP",
-				SourceIP:  "1.2.3.4",
-				UserAgent: "go",
-			},
-		},
-		StageVariables: map[string]string{
-			"sk1": "sv1",
-		},
-		Body:            `{ "bk1": "bv1" }`,
-		IsBase64Encoded: false,
-	}
-
-	var cReq *http.Request
-	var cReqBody []byte
-
-	s.Logs.Mock.EXPECT().TraceHTTPRequestServer(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, req *http.Request, reqBody []byte) (context.Context, func()) {
-		cReq = req
-		cReqBody = reqBody
-		return ctx, func() {}
-	})
-
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Request Context"), gomock.Any())
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Query String Parameters"), gomock.Any())
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Path Parameters"), gomock.Any())
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Stage Variables"), gomock.Any())
-
-	ctx, _ = NewHTTPRouter().prepareContext(ctx, event)
-	require.Equal(t, newHTTPRequestContext(event), GetHTTPRequestContext(ctx))
-	require.Equal(t, newHTTPResponseContext(), GetHTTPResponseContext(ctx))
-
-	require.Equal(t, "POST", cReq.Method)
-	require.Equal(t, "https:///p1/%7Bpk1%7D", cReq.URL.String())
-	require.Equal(t, []byte(`{ "bk1": "bv1" }`), cReqBody)
+	}, cReq)
 }
 
 func (s *Suite) TestHTTPRouter_PrepareContext_RouteKeyFallback(ctx context.Context, t *testing.T) {
@@ -637,32 +588,38 @@ func (s *Suite) TestHTTPRouter_PrepareContext_RouteKeyFallback(ctx context.Conte
 		IsBase64Encoded: false,
 	}
 
-	var cReq *http.Request
-	var cReqBody []byte
-
-	s.Logs.Mock.EXPECT().TraceHTTPRequestServer(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, req *http.Request, reqBody []byte) (context.Context, func()) {
+	var cReq *sentry.Request
+	s.Logs.Mock.EXPECT().TraceHTTPRequestServerSimple(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, req *sentry.Request) (context.Context, func()) {
 		cReq = req
-		cReqBody = reqBody
 		return ctx, func() {}
 	})
 
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Request Context"), gomock.Any())
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Query String Parameters"), gomock.Any())
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Path Parameters"), gomock.Any())
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Stage Variables"), gomock.Any())
+	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("requestContext"), gomock.Any())
+	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("pathParameters"), gomock.Any())
+	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("stageVariables"), gomock.Any())
 
-	ctx, _ = NewHTTPRouter().prepareContext(ctx, event)
+	ctx, _ = NewHTTPRouter().SetInjector(injectz.NewNoopInjector()).prepareContext(ctx, event)
 	require.Equal(t, newHTTPRequestContext(event), GetHTTPRequestContext(ctx))
 	require.Equal(t, newHTTPResponseContext(), GetHTTPResponseContext(ctx))
 
-	require.Equal(t, "POST", cReq.Method)
-	require.Equal(t, "https:///p1/pv1", cReq.URL.String())
-	require.Equal(t, []byte(`{ "bk1": "bv1" }`), cReqBody)
+	require.Equal(t, &sentry.Request{
+		URL:         "/p1/pv1",
+		Method:      "POST",
+		Data:        `{ "bk1": "bv1" }`,
+		QueryString: "qs1=qv1",
+		Cookies:     "name=",
+		Headers: map[string]string{
+			"Content-Type": "application/json; charset=utf-8",
+		},
+		Env: map[string]string{
+			"REMOTE_ADDR": "1.2.3.4",
+		},
+	}, cReq)
 }
 
-func (s *Suite) TestHTTPRouter_PrepareContext_RouteKeyDefault(ctx context.Context, t *testing.T) {
+func (s *Suite) TestHTTPRouter_PrepareContext_RouteKeyAny(ctx context.Context, t *testing.T) {
 	event := &events.APIGatewayV2HTTPRequest{
-		RouteKey:       "$default",
+		RouteKey:       "ANY /p1/{pk1}",
 		RawPath:        "/p1/pv1",
 		RawQueryString: "qs1=qv1",
 		Cookies: []string{
@@ -694,144 +651,31 @@ func (s *Suite) TestHTTPRouter_PrepareContext_RouteKeyDefault(ctx context.Contex
 		IsBase64Encoded: false,
 	}
 
-	var cReq *http.Request
-	var cReqBody []byte
-
-	s.Logs.Mock.EXPECT().TraceHTTPRequestServer(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, req *http.Request, reqBody []byte) (context.Context, func()) {
+	var cReq *sentry.Request
+	s.Logs.Mock.EXPECT().TraceHTTPRequestServerSimple(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, req *sentry.Request) (context.Context, func()) {
 		cReq = req
-		cReqBody = reqBody
 		return ctx, func() {}
 	})
 
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Request Context"), gomock.Any())
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Query String Parameters"), gomock.Any())
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Path Parameters"), gomock.Any())
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Stage Variables"), gomock.Any())
+	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("requestContext"), gomock.Any())
+	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("pathParameters"), gomock.Any())
+	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("stageVariables"), gomock.Any())
 
-	ctx, _ = NewHTTPRouter().prepareContext(ctx, event)
+	ctx, _ = NewHTTPRouter().SetInjector(injectz.NewNoopInjector()).prepareContext(ctx, event)
 	require.Equal(t, newHTTPRequestContext(event), GetHTTPRequestContext(ctx))
 	require.Equal(t, newHTTPResponseContext(), GetHTTPResponseContext(ctx))
 
-	require.Equal(t, "POST", cReq.Method)
-	require.Equal(t, "https:///p1/pv1", cReq.URL.String())
-	require.Equal(t, []byte(`{ "bk1": "bv1" }`), cReqBody)
-}
-
-func (s *Suite) TestHTTPRouter_PrepareContext_Base64EncodedBody(ctx context.Context, t *testing.T) {
-	event := &events.APIGatewayV2HTTPRequest{
-		RouteKey:       "bad",
-		RawPath:        "/p1/pv1",
-		RawQueryString: "qs1=qv1",
-		Cookies: []string{
-			"name=",
-		},
+	require.Equal(t, &sentry.Request{
+		URL:         "/p1/{pk1}",
+		Method:      "POST",
+		Data:        `{ "bk1": "bv1" }`,
+		QueryString: "qs1=qv1",
+		Cookies:     "name=",
 		Headers: map[string]string{
 			"Content-Type": "application/json; charset=utf-8",
 		},
-		QueryStringParameters: map[string]string{
-			"qs1": "qv1",
+		Env: map[string]string{
+			"REMOTE_ADDR": "1.2.3.4",
 		},
-		PathParameters: map[string]string{
-			"pk1": "pv1",
-		},
-		RequestContext: events.APIGatewayV2HTTPRequestContext{
-			RouteKey: "POST /p1/{pk1",
-			HTTP: events.APIGatewayV2HTTPRequestContextHTTPDescription{
-				Method:    "POST",
-				Path:      "/p1/pv1",
-				Protocol:  "HTTP",
-				SourceIP:  "1.2.3.4",
-				UserAgent: "go",
-			},
-		},
-		StageVariables: map[string]string{
-			"sk1": "sv1",
-		},
-		Body:            base64.StdEncoding.EncodeToString([]byte(`{ "bk1": "bv1" }`)),
-		IsBase64Encoded: true,
-	}
-
-	var cReq *http.Request
-	var cReqBody []byte
-
-	s.Logs.Mock.EXPECT().TraceHTTPRequestServer(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, req *http.Request, reqBody []byte) (context.Context, func()) {
-		cReq = req
-		cReqBody = reqBody
-		return ctx, func() {}
-	})
-
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Request Context"), gomock.Any())
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Query String Parameters"), gomock.Any())
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Path Parameters"), gomock.Any())
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Stage Variables"), gomock.Any())
-
-	type ck int
-	injector := func(ctx context.Context) context.Context {
-		return context.WithValue(ctx, ck(1), "cv1")
-	}
-
-	ctx, _ = NewHTTPRouter().SetInjector(injector).prepareContext(ctx, event)
-	require.Equal(t, newHTTPRequestContext(event), GetHTTPRequestContext(ctx))
-	require.Equal(t, newHTTPResponseContext(), GetHTTPResponseContext(ctx))
-	require.Equal(t, "cv1", ctx.Value(ck(1)))
-
-	require.Equal(t, "POST", cReq.Method)
-	require.Equal(t, "https:///p1/pv1", cReq.URL.String())
-	require.Equal(t, []byte(`{ "bk1": "bv1" }`), cReqBody)
-}
-
-func (s *Suite) TestHTTPRouter_PrepareContext_InvalidBase64EncodedBody(ctx context.Context, t *testing.T) {
-	event := &events.APIGatewayV2HTTPRequest{
-		RouteKey:       "bad",
-		RawPath:        "/p1/pv1",
-		RawQueryString: "qs1=qv1",
-		Cookies: []string{
-			"name=",
-		},
-		Headers: map[string]string{
-			"Content-Type": "application/json; charset=utf-8",
-		},
-		QueryStringParameters: map[string]string{
-			"qs1": "qv1",
-		},
-		PathParameters: map[string]string{
-			"pk1": "pv1",
-		},
-		RequestContext: events.APIGatewayV2HTTPRequestContext{
-			RouteKey: "POST /p1/{pk1",
-			HTTP: events.APIGatewayV2HTTPRequestContextHTTPDescription{
-				Method:    "POST",
-				Path:      "/p1/pv1",
-				Protocol:  "HTTP",
-				SourceIP:  "1.2.3.4",
-				UserAgent: "go",
-			},
-		},
-		StageVariables: map[string]string{
-			"sk1": "sv1",
-		},
-		Body:            "bad",
-		IsBase64Encoded: true,
-	}
-
-	var cReq *http.Request
-	var cReqBody []byte
-
-	s.Logs.Mock.EXPECT().TraceHTTPRequestServer(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, req *http.Request, reqBody []byte) (context.Context, func()) {
-		cReq = req
-		cReqBody = reqBody
-		return ctx, func() {}
-	})
-
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Request Context"), gomock.Any())
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Query String Parameters"), gomock.Any())
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Path Parameters"), gomock.Any())
-	s.Logs.Mock.EXPECT().AddMetadata(gomock.Any(), gomock.Eq("Stage Variables"), gomock.Any())
-
-	ctx, _ = NewHTTPRouter().prepareContext(ctx, event)
-	require.Equal(t, newHTTPRequestContext(event), GetHTTPRequestContext(ctx))
-	require.Equal(t, newHTTPResponseContext(), GetHTTPResponseContext(ctx))
-
-	require.Equal(t, "https:///p1/pv1", cReq.URL.String())
-	require.Equal(t, []byte(`bad`), cReqBody)
+	}, cReq)
 }
